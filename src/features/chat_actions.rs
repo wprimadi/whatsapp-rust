@@ -129,6 +129,7 @@ const CHAT_ACTION_KINDS: &[&str] = &[
     "archive",
     "star",
     "contact",
+    "lid_contact",
     "mark_chat_as_read",
     "markChatAsRead",
     "deleteChat",
@@ -176,8 +177,8 @@ pub(crate) fn dispatch_chat_mutation_outcome_with_clock(
     // with no JID is still a contact removal, and the missing-JID branch
     // below reports it as `Skipped` rather than misrouting it to `Unclaimed`
     // (no other dispatcher owns contact removals).
-    let is_contact_remove =
-        m.operation == wa::syncd_mutation::SyncdOperation::REMOVE && kind == "contact";
+    let is_contact_remove = m.operation == wa::syncd_mutation::SyncdOperation::REMOVE
+        && (kind == "contact" || kind == "lid_contact");
     if m.operation != wa::syncd_mutation::SyncdOperation::SET && !is_contact_remove {
         return AppStateDispatchOutcome::Unclaimed;
     }
@@ -299,7 +300,7 @@ pub(crate) fn dispatch_chat_mutation_outcome_with_clock(
                 AppStateDispatchOutcome::Malformed("StarUpdate")
             }
         }
-        "contact" if is_contact_remove => {
+        "contact" | "lid_contact" if is_contact_remove => {
             event_bus.dispatch(Event::ContactRemoved(
                 ContactRemoved::builder()
                     .jid(jid)
@@ -314,6 +315,32 @@ pub(crate) fn dispatch_chat_mutation_outcome_with_clock(
             if let Some(val) = &mut m.action_value
                 && let Some(act) = val.contact_action.take()
             {
+                event_bus.dispatch(Event::ContactUpdate(
+                    ContactUpdate::builder()
+                        .jid(jid)
+                        .timestamp(time)
+                        .maybe_action_timestamp(action_timestamp)
+                        .action(Box::new(act))
+                        .from_full_sync(event_full_sync)
+                        .build(),
+                ));
+                AppStateDispatchOutcome::Event("ContactUpdate")
+            } else {
+                AppStateDispatchOutcome::Malformed("ContactUpdate")
+            }
+        }
+        // WAWebLidContactSync: an address-book entry keyed by LID, with no
+        // phone number. Reported as a contact whose `lid_jid` is the index.
+        "lid_contact" => {
+            if let Some(val) = &mut m.action_value
+                && let Some(lid) = val.lid_contact_action.take()
+            {
+                let mut act = wa::sync_action_value::ContactAction::default();
+                act.full_name = lid.full_name;
+                act.first_name = lid.first_name;
+                act.lid_jid = Some(jid.to_string());
+                act.username = lid.username;
+                act.birthday = lid.birthday;
                 event_bus.dispatch(Event::ContactUpdate(
                     ContactUpdate::builder()
                         .jid(jid)
@@ -1705,6 +1732,37 @@ mod registry_tests {
         let (outcome, events) = dispatch_outcome_into_recorder(&m);
         assert!(outcome != AppStateDispatchOutcome::Unclaimed);
         assert!(matches!(&*events[0], Event::ContactUpdate(_)));
+    }
+
+    #[test]
+    fn a_lid_contact_is_reported_as_a_contact_update() {
+        let m = Mutation {
+            index: vec!["lid_contact".into(), "100000000000001@lid".into()],
+            operation: wa::syncd_mutation::SyncdOperation::SET,
+            action_value: Some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.lid_contact_action = buffa::MessageField::some({
+                    let mut proto = wa::sync_action_value::LidContactAction::default();
+                    proto.full_name = Some("Alex Doe".into());
+                    proto
+                });
+                proto
+            }),
+        };
+        let (outcome, events) = dispatch_outcome_into_recorder(&m);
+        assert!(outcome != AppStateDispatchOutcome::Unclaimed);
+        match &*events[0] {
+            Event::ContactUpdate(u) => {
+                assert_eq!(u.jid.to_string(), "100000000000001@lid");
+                assert_eq!(u.action.full_name.as_deref(), Some("Alex Doe"));
+                assert_eq!(u.action.lid_jid.as_deref(), Some("100000000000001@lid"));
+            }
+            other => panic!("expected ContactUpdate, got {other:?}"),
+        }
+        let mut removed = m.clone();
+        removed.operation = wa::syncd_mutation::SyncdOperation::REMOVE;
+        let (_, events) = dispatch_outcome_into_recorder(&removed);
+        assert!(matches!(&*events[0], Event::ContactRemoved(_)));
     }
 
     #[test]
