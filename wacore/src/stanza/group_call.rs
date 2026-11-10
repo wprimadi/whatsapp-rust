@@ -1324,11 +1324,14 @@ fn audio_opus(rate: &str) -> Node {
 
 #[cold]
 #[inline(never)]
+/// The codec spellings WA's `<video>` reader (`fill_video`) accepts: `enc`
+/// `h.264` and `dec` `H264`, with no `orientation` attribute. The dotless
+/// `h264` was dropped silently: the group video offer was acked and never rang,
+/// as the same spelling did on 1:1 offers (see `stanza::call`).
 fn video_offer_node(device_orientation: u8) -> Node {
     NodeBuilder::new("video")
-        .attr("enc", "h264")
-        .attr("dec", "h264")
-        .attr("orientation", "0")
+        .attr("enc", "h.264")
+        .attr("dec", "H264")
         .attr("screen_width", "1920")
         .attr("screen_height", "1080")
         .attr("device_orientation", device_orientation.to_string())
